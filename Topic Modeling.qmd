@@ -1,0 +1,214 @@
+---
+title: "Topic Modeling"
+author: "Liwen Yin"
+format: pdf
+editor: visual
+---
+
+## Topic Modeling
+
+```{r}
+library(topicmodels)
+library(tidytext)
+library(lexicon)
+library(factoextra)
+library(ggplot2)
+library(tidyverse)
+```
+##read dataset
+```{r}
+movies <- read.csv("movie_plots.csv")
+movies_gen <- read.csv("movie_plots_with_genres.csv")
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+unique_genres <- movies_gen %>%
+  select(Genre) %>%
+  distinct() 
+kable(unique_genres, col.names = "Unique Genres")
+```
+There are 8 genres in movie genres dataset.
+##Data structure
+```{r}
+plots_by_word<-movies %>%  unnest_tokens(word, Plot)
+plot_word_counts<-plots_by_word%>%
+anti_join(stop_words) %>%
+count(Movie.Name, word, sort = TRUE)
+data("freq_first_names")
+first_names <- tolower(freq_first_names$Name)
+plot_word_counts <- plot_word_counts %>% filter(!(word %in% first_names))
+plots_dtm<-plot_word_counts %>%  cast_dtm(Movie.Name, word, n)
+dim(plot_word_counts |> distinct(word))[1]
+dim(movies)
+dim(plots_dtm)
+```
+##Elbow Method for Determining Optimal K
+```{r}
+library(ggplot2)
+library(factoextra)
+set.seed(1)
+plots_lda <- LDA(plots_dtm, k = 8, control = list(seed = 1))
+plots_gamma <- tidy(plots_lda, matrix = "gamma")
+plots_gamma_wider<-plots_gamma |> pivot_wider(
+names_from = topic,
+values_from = gamma)
+
+wss <- numeric()
+for (k in 1:15) {
+  kmeans_result <- kmeans(plots_gamma_wider %>% select(-document), centers = k, nstart = 25)
+  wss[k] <- kmeans_result$tot.withinss
+}
+elbow_plot <- data.frame(k = 1:15, WSS = wss)
+ggplot(elbow_plot, aes(x = k, y = WSS)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Elbow Method for Determining Optimal K",
+       x = "Number of Clusters (k)",
+       y = "Total Within-Cluster Sum of Squares") +
+  theme_minimal()
+```
+According to the plot above, I would like to choose k=8 to do the following clustering.
+```{r fig.width=7, fig.height=7}
+library(tidytext)
+plots_topics <- tidy(plots_lda, matrix = "beta")
+top_terms <- plots_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+print(top_terms)
+
+library(tidytext)
+library(ggplot2)
+plots_topics <- tidy(plots_lda, matrix = "beta")
+top_terms <- plots_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+ggplot(top_terms, aes(x = reorder(term, beta), y = beta, fill = factor(topic))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ topic, scales = "free", ncol = 2) +
+  coord_flip() +
+  labs(title = "Top Terms in Each Topic (Beta Plot)",
+       x = "Term",
+       y = "Beta Value") +
+  theme_minimal() +
+theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+ggsave("beta_plot.pdf", height = 10, width = 8)  # 调整图表的高度
+```
+Plots above are the beta plots.
+
+```{r}
+library(fmsb)
+document_index <- 1  
+radar_data <- plots_gamma_wider[document_index, -1]
+radar_data <- rbind(rep(1, ncol(radar_data)), rep(0, ncol(radar_data)), radar_data)
+radarchart(radar_data, axistype = 1, pcol = "blue", pfcol = rgb(0.2, 0.5, 0.5, 0.5), plwd = 2,
+           title = paste("Radar Chart for Document", document_index))
+```
+
+##K-means cluster
+```{r}
+plots_gamma_wider_no_na<-plots_gamma_wider %>%  drop_na () 
+cluster<-kmeans(plots_gamma_wider %>% select(-document), 8)
+fviz_cluster(cluster, data = plots_gamma_wider %>% 
+select(-document))
+```
+Following plots are the number of movies per genre in different cluster. However, the frequency of some movies have similar type.
+```{r}
+clusters <- cluster[["cluster"]]
+plots_gamma_wider$cluster <- clusters
+for (i in 1:8) {
+  plots_cluster <- plots_gamma_wider %>% filter(cluster == i)
+  cluster_names <- plots_cluster$document
+  cluster_data <- movies_gen %>% filter(Movie.Name %in% cluster_names)
+  cluster_counts <- cluster_data %>%
+    group_by(Genre) %>%
+    summarize(n = n())
+  plot <- ggplot(cluster_counts, aes(x = Genre, y = n, fill = Genre)) +
+    geom_bar(stat = "identity") +
+    labs(title = paste("Number of Movies per Genre in Cluster", i),
+         x = "Genre",
+         y = "Number of Movies") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(plot)
+}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+clusters <- cluster[["cluster"]]
+plots_gamma_wider$cluster <- clusters
+plots_gamma_long <- plots_gamma %>%
+  left_join(plots_gamma_wider %>% select(document, cluster), by = "document") %>%
+  mutate(topic = as.factor(topic), cluster = as.factor(cluster))
+
+ggplot(plots_gamma_long, aes(x = cluster, y = gamma, color = topic, fill = topic)) +
+  geom_violin(alpha = 0.5) +
+  labs(title = "Density Plot of Gamma Values by Cluster",
+       x = "Cluster",
+       y = "Gamma Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+library(dplyr)
+plots_gamma_classified <- plots_gamma %>%
+  group_by(document) %>%
+  slice_max(gamma, n = 1) %>%  
+  ungroup() %>%
+  select(document, topic, gamma)
+plots_gamma_classified <- plots_gamma_classified %>%
+  mutate(topic = as.factor(topic),
+         category = paste("Category", topic))
+head(plots_gamma_classified)
+ggplot(plots_gamma_classified, aes(x = category)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Number of Documents per Category",
+       x = "Category",
+       y = "Number of Documents") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+clusters <- cluster[["cluster"]]
+plots_gamma_wider$cluster <- clusters
+plots_topics <- tidy(plots_lda, matrix = "beta")
+library(dplyr)
+top_terms_unique <- plots_topics %>%
+  group_by(topic) %>%
+  arrange(desc(beta)) %>%
+  mutate(rank = row_number()) %>%
+  filter(rank <= 10) %>%
+  ungroup() %>%
+  arrange(topic, rank)
+unique_terms_per_topic <- top_terms_unique %>%
+  group_by(topic) %>%
+  slice(1)  
+plots_gamma_classified <- plots_gamma_classified %>%
+  mutate(topic = as.character(topic))
+
+unique_terms_per_topic <- unique_terms_per_topic %>%
+  mutate(topic = as.character(topic))
+plots_gamma_classified <- plots_gamma_classified %>%
+  left_join(unique_terms_per_topic %>% select(topic, term), by = "topic")
+ggplot(plots_gamma_classified, aes(x = category)) +
+  geom_bar(fill = "steelblue") +
+  geom_text(aes(label = term), stat = "count", vjust = -0.5, size = 3) +
+  labs(title = "Number of Documents per Category with Top Term",
+       x = "Category",
+       y = "Number of Documents") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
